@@ -6,11 +6,7 @@ Solucao didatica em C/MPI com distribuicao estatica ciclica e distribuicao dinam
 
 Requer implementacao MPI (OpenMPI ou MPICH) com `mpicc` e `mpirun`:
 
-```sh
-make
-```
-
-## Execucao
+### Execucao
 
 ```sh
 mpirun -np 5 ./busca_logs --dir logs --search ERROR --mode static
