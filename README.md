@@ -1,54 +1,62 @@
-# Busca distribuida em logs
+# INE5645 — Busca distribuída em logs
 
-Solucao didatica em C/MPI com distribuicao estatica ciclica e distribuicao dinamica master-worker.
+Aplicação em **C com MPI** para buscar um termo em arquivos `.log`, comparando distribuição **estática** e **dinâmica** de tarefas no padrão master–worker.
 
-## Compilacao
+## Compilação
 
-Requer implementacao MPI (OpenMPI ou MPICH) com `mpicc` e `mpirun`:
+Requer compilador C e uma implementação MPI (por exemplo, Open MPI).
 
-### Execucao
+```bash
+mpicc -O3 -Wall -Wextra -std=c11 busca_logs.c -o busca_logs
+gcc -O2 -Wall -Wextra gerador_logs_t2.c -o gerador_logs_t2
+```
 
-```sh
+Para testar o envio estático em blocos com um limite artificial de 4 KiB:
+
+```bash
+mpicc -O3 -Wall -Wextra -std=c11 -DLIMITE_MENSAGEM_STATIC=4096 busca_logs.c -o busca_logs_bloco
+```
+
+## Geração e execução local
+
+```bash
+./gerador_logs_t2 100 10000 8 42 logs
+
 mpirun -np 5 ./busca_logs --dir logs --search ERROR --mode static
 mpirun -np 5 ./busca_logs --dir logs --search ERROR --mode dynamic
 ```
 
-`-np 5` representa 1 master (rank 0) e 4 workers. Sao necessarios pelo menos 2 processos.
-O parametro `--search` aceita sequencias, inclusive com espacos se colocadas entre aspas.
+`-np 5` corresponde a **1 coordenador e 4 workers**. São necessários pelo menos dois processos MPI. Todos os processos devem acessar o mesmo diretório de arquivos.
 
-## Decisoes de implementacao
+## Implementação
 
-- O rank 0 enumera arquivos regulares com extensao `.log`, sem recursao, e ordena nomes com `strcmp`.
-- A lista de nomes e transmitida aos workers uma unica vez via `MPI_Bcast`.
-- Os processos abrem diretamente os arquivos a partir do diretorio indicado. **Todos precisam enxergar os mesmos arquivos e caminho** (por exemplo, filesystem compartilhado do cluster).
-- Cada arquivo e uma tarefa indivisivel.
-- Estrategia estatica ciclica: arquivo de indice i vai para o worker `(i % W) + 1`. Cada worker recebe sua lista completa antes de iniciar a busca; a medicao inclui essa distribuicao.
-- Estrategia dinamica: workers enviam READY, recebem TASK, enviam RESULT e voltam a enviar READY; STOP encerra cada worker.
-- A busca usa `getline` e `strstr` (case-sensitive); cada linha correspondente conta uma unica vez.
-- Resultados sao escritos em arquivos temporarios e enviados ao master em blocos de ate 64 KiB, para evitar alocar todas as linhas encontradas na memoria.
-- O master armazena resultados separados por arquivo e imprime na ordem de nome e linha.
-- `MPI_Wtime` mede distribuicao das tarefas/procura/transmissao/consolidacao em arquivos temporarios; nao inclui listagem inicial, broadcast inicial da lista de nomes, nem impressao final no terminal.
-- Arquivos que nao puderem ser lidos sao assinalados e a execucao termina com codigo de erro.
+- Cada processo lista e ordena os arquivos `.log` do diretório; cada arquivo é uma tarefa indivisível.
+- **Estática:** o master distribui previamente os índices de forma cíclica. Cada worker devolve seus resultados em uma mensagem empacotada (`MPI_Pack`) ou, se exceder o limite definido, envia metadados e texto em blocos.
+- **Dinâmica:** o master atribui um arquivo por vez e envia uma nova tarefa assim que recebe o resultado do worker; usa `-1` para encerrar.
+- A busca utiliza `getline` e `strstr`, diferenciando maiúsculas e minúsculas. Cada linha encontrada conta uma vez, mesmo com múltiplas ocorrências do termo.
+- O master consolida a saída em ordem de arquivo e número de linha, com total por arquivo, total geral e tempo.
+- O tempo medido com `MPI_Wtime` inclui distribuição, busca e comunicação dos resultados, mas **não** a listagem inicial dos arquivos nem a impressão final.
 
-## Testes sugeridos
+## Execução no Santos Dumont
 
-```sh
-mkdir -p logs
-printf 'INFO ok\nERROR falha\nERROR ERROR repetido\n' > logs/a.log
-printf 'WARNING ok\nERROR segunda\n' > logs/b.log
-mpirun -np 3 ./busca_logs --dir logs --search ERROR --mode static > static.txt
-mpirun -np 3 ./busca_logs --dir logs --search ERROR --mode dynamic > dynamic.txt
-# Compare o trecho de resultados e os totais; o tempo ira diferir.
+Código e scripts `.srm` ficam na **HOME** (`~/busca_logs_t2`); executáveis, logs de entrada e resultados ficam no **SCRATCH** (`$SCRATCH/busca_logs_t2`). Após compilar, copie o executável para o SCRATCH.
+
+```bash
+module load openmpi/gnu/4.1.4_sequana
+cd ~/busca_logs_t2
+mpicc -O3 -Wall -Wextra -std=c11 busca_logs.c -o busca_logs
+cp busca_logs "$SCRATCH/busca_logs_t2/"
+
+cd "$SCRATCH/busca_logs_t2"
+sbatch --nodes=1 --ntasks=4 --ntasks-per-node=4 \
+  --export=ALL,DATASET=logs,TERMO=ERROR,REPETICOES=5 \
+  "$HOME/busca_logs_t2/job_benchmark.srm"
 ```
 
-## Avaliacao experimental
+O script `job_gerador.srm` gera os datasets; `job_busca.srm` executa uma estratégia isoladamente; `job_benchmark.srm` alterna as estratégias, compara as saídas e registra os tempos em `resultados/tempos-<job>.csv`. As execuções MPI nos scripts usam `mpirun` dentro da alocação Slurm.
 
-Execute ambas as estrategias com as mesmas entradas, para 2, 4, 8 workers, repetindo 5 vezes cada caso. Teste arquivos similares e arquivos de tamanhos diferentes. Registre tempos e compare speedup relativo, media, variabilidade e custo de comunicacao. Para medir speedup contra um programa sequencial, implemente tambem um baseline sequencial equivalente (nao use a execucao MPI com um worker como substituto silencioso).
+## Experimentos e limitações
 
-## Observacoes
+Os testes no Santos Dumont utilizaram **100, 500, 1.000 e 5.000 arquivos**, com **4 a 96 processos MPI** e até **4 nós**, repetindo as buscas cinco vezes por configuração. Os resultados permitem comparar tempo, variação entre repetições e escalabilidade.
 
-- Utiliza POSIX (`getline`, `tmpfile`, `fseeko`, `ftello`) e MPI com `MPI_UINT64_T`.
-- Nao faz busca em subdiretorios; nao processa arquivos sem a extensao `.log`.
-- Resultados temporarios requerem espaco em disco e o master precisa de espaco proporcional ao volume total de linhas encontradas.
-- Para comparacoes de tempo com muitos matches, redirecione a saida para arquivo; o tempo exibido nao inclui a escrita final da saida.
-- A versao foi preparada para compilacao com MPI, mas o ambiente de autoria nao dispunha de `mpicc`/`mpirun`; valide no ambiente de execucao do grupo antes da entrega.
+Os resultados são acumulados em memória antes do envio; a dinâmica envia um arquivo por mensagem e a estática pode dividir lotes grandes em blocos. O limite normal para o pacote estático é `INT_MAX - 16 MiB`. A listagem inicial, realizada por todos os processos, não entra no tempo medido. Para avaliar o tempo total do programa, é necessária uma medição adicional de ponta a ponta.

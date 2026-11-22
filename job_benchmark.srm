@@ -1,0 +1,68 @@
+#!/bin/bash
+#SBATCH --job-name=benchmark-busca
+#SBATCH --partition=sequana_cpu_dev
+#SBATCH --nodes=1
+#SBATCH --ntasks=4
+#SBATCH --ntasks-per-node=4
+#SBATCH --cpus-per-task=1
+#SBATCH --time=00:10:00
+#SBATCH --output=benchmark-%j.out
+
+set -euo pipefail
+
+module load openmpi/gnu/4.1.4_sequana
+
+cd "$SCRATCH/busca_logs_t2" || exit 1
+mkdir -p resultados
+
+DATASET=${DATASET:-logs}
+TERMO=${TERMO:-ERROR}
+REPETICOES=${REPETICOES:-5}
+
+SUMARIO="resultados/tempos-${SLURM_JOB_ID}.csv"
+
+echo "repeticao,modo,tempo_s" > "$SUMARIO"
+
+echo "Job: $SLURM_JOB_ID"
+echo "Processos: $SLURM_NTASKS"
+echo "Dataset: $DATASET"
+
+for ((i = 1; i <= REPETICOES; i++)); do
+    if (( i % 2 == 1 )); then
+        MODOS=(static dynamic)
+    else
+        MODOS=(dynamic static)
+    fi
+
+    for MODO in "${MODOS[@]}"; do
+        SAIDA="resultados/${MODO}-${SLURM_JOB_ID}-r${i}.txt"
+
+        mpirun -np "$SLURM_NTASKS" \
+            ./busca_logs \
+            --dir "$DATASET" \
+            --search "$TERMO" \
+            --mode "$MODO" \
+            > "$SAIDA"
+
+        TEMPO=$(awk '
+            /^Tempo de execucao:/ {tempo=$4; encontrou=1}
+            END {
+                if (!encontrou) exit 1
+                print tempo
+            }
+        ' "$SAIDA")
+
+        echo "$i,$MODO,$TEMPO" >> "$SUMARIO"
+
+        echo "Repeticao $i | $MODO | $TEMPO s"
+    done
+
+    diff -q \
+      <(sed '/^Tempo de execucao:/d' \
+        "resultados/static-${SLURM_JOB_ID}-r${i}.txt") \
+      <(sed '/^Tempo de execucao:/d' \
+        "resultados/dynamic-${SLURM_JOB_ID}-r${i}.txt")
+
+done
+
+echo "Benchmark concluido: $SUMARIO"
